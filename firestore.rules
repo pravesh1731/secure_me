@@ -1,0 +1,49 @@
+rules_version = '2';
+
+// Secure-Me never stores files. Firestore only holds:
+//   users/{uid}            public profile + RSA public key (key directory)
+//   users/{uid}/contacts   the owner's recent recipients
+//   vaults/{uid}           the owner's private key, encrypted with their password
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      // Any signed-in user can look up a public key, one user at a time.
+      allow get: if signedIn();
+      allow list: if signedIn() && request.query.limit <= 1;
+
+      // Only the owner can publish their profile, and only under their own
+      // verified sign-in email, so nobody can impersonate another address.
+      allow create, update: if isOwner(uid) && validProfile(request.resource.data);
+      allow delete: if false;
+
+      function validProfile(d) {
+        return d.keys().hasOnly(['displayName', 'email', 'emailLower', 'publicKey', 'fingerprint', 'keyUpdatedAt'])
+          && d.email == request.auth.token.email
+          && d.emailLower == request.auth.token.email.lower()
+          && d.displayName is string && d.displayName.size() <= 100
+          && d.publicKey is string && d.publicKey.size() <= 2048
+          && d.fingerprint is string && d.fingerprint.size() == 64;
+      }
+
+      match /contacts/{contactUid} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    match /vaults/{uid} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
